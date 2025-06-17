@@ -1,0 +1,21 @@
+Session 2025-06-03 Notes: 
+
+Molecules to Numerical features: 
+
+-descriptors/fingerprints
+- SMILES strings
+- Graph representations
+
+ML models: 
+- regression (predict numerical values)
+- classification
+
+Libraries: 
+- RDkit (chemistry tools eg Morgan fingerprint)
+    - chem
+    - AllChem
+- scikit-learn (ML models)
+- pandas, matplotlib (data handling, visualization)
+
+
+
