@@ -1,13 +1,17 @@
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedGroupKFold
 from sklearn.linear_model import LogisticRegression
 import joblib
 import os
 import json
 import time
+from sklearn.preprocessing import StandardScaler
+from scipy.sparse import hstack
+import numpy as np
 
 from .dataset import basic_dataloader
 from . import eval
+from . import models
 
 def run_experiment(config):
     """
@@ -33,30 +37,75 @@ def run_experiment(config):
 
     # 1. Load Data
     print("\n[1/4] Loading data...")
-    X, y = basic_dataloader(
+    X_fp, X_num, y = basic_dataloader(
         filepath=config['DATA_PATH'],
-        x_cols=config['FEATURES'],
+        fingerprint_cols=config['FINGERPRINT_FEATURES'],
+        numeric_cols=config.get('NUMERIC_FEATURES'),
         y_col=config['LABEL'],
         max_to_load=config.get('MAX_ROWS')
     )
-    print(f"Data loaded. Feature shape: {X.shape}, Label shape: {y.shape}")
+    print(f"Data loaded. Fingerprint shape: {X_fp.shape if X_fp is not None else 'N/A'}, Numeric shape: {X_num.shape if X_num is not None else 'N/A'}")
 
     # 2. Split Data
-    print("\n[2/4] Splitting data into training and validation sets...")
-    X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=config['TEST_SIZE'], random_state=42, stratify=y
-    )
-    print(f"Train set size: {X_train.shape[0]} samples")
-    print(f"Validation set size: {X_val.shape[0]} samples")
+    print("\n[2/4] Splitting data into training and validation sets using Grouped Stratification...")
+    
+    # Load group IDs for a leak-free split, ensuring all rows for a given compound are in the same set
+    print("Loading group IDs for splitting...")
+    groups = pd.read_parquet(
+        config['DATA_PATH'], 
+        columns=['DEL_ID']
+    )['DEL_ID'].values
+    if config.get('MAX_ROWS'):
+        groups = groups[:config.get('MAX_ROWS')]
 
-    # 3. Train Model
-    print("\n[3/4] Training Logistic Regression model...")
-    model = LogisticRegression(class_weight='balanced', random_state=42, max_iter=1000, solver='liblinear')
-    model.fit(X_train, y_train)
+    # Use StratifiedGroupKFold to ensure groups (DEL_IDs) are not split across train/val
+    # and that the label distribution is maintained.
+    n_splits = int(1.0 / config['TEST_SIZE'])
+    sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    
+    # We only need the first split from the generator
+    train_idx, val_idx = next(sgkf.split(np.zeros(len(y)), y, groups))
+    
+    y_train, y_val = y[train_idx], y[val_idx]
+    
+    X_fp_train, X_fp_val = None, None
+    if X_fp is not None:
+        X_fp_train, X_fp_val = X_fp[train_idx], X_fp[val_idx]
+        
+    X_num_train, X_num_val = None, None
+    if X_num is not None:
+        X_num_train, X_num_val = X_num[train_idx], X_num[val_idx]
+
+
+    # 3. Scale Numeric Features and Combine
+    print("\n[3/4] Scaling numeric features and combining with fingerprints...")
+    X_train_final = X_fp_train
+    X_val_final = X_fp_val
+
+    if X_num is not None:
+        scaler = StandardScaler()
+        X_num_train_scaled = scaler.fit_transform(X_num_train)
+        X_num_val_scaled = scaler.transform(X_num_val)
+        
+        # Combine scaled numeric features with sparse fingerprint features
+        X_train_final = hstack([X_fp_train, X_num_train_scaled], format='csr')
+        X_val_final = hstack([X_fp_val, X_num_val_scaled], format='csr')
+
+    print(f"Final training feature shape: {X_train_final.shape}")
+    print(f"Final validation feature shape: {X_val_final.shape}")
+
+
+    # 4. Train Model
+    print(f"\n[4/4] Training {config['MODEL_NAME']} model...")
+    model = models.get_model(
+        config['MODEL_NAME'], 
+        config.get('MODEL_PARAMS')
+    )
+    model.fit(X_train_final, y_train)
     print("Model training complete.")
 
-    # 4. Evaluate Model and Save Results
-    eval.evaluate_and_save_results(model, X_val, y_val, output_dir)
+    # 5. Evaluate Model and Save Results
+    eval.evaluate_and_save_results(model, X_val_final, y_val, output_dir)
 
     # Save the trained model artifact
     if config.get('MODEL_OUTPUT_PATH'):
