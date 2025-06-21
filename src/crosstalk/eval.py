@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import classification_report, roc_auc_score, roc_curve, confusion_matrix, precision_recall_curve
 import pandas as pd
+import numpy as np
 
 def evaluate_and_save_results(model, X_val, y_val, output_dir, result_name='validation'):
     """
@@ -143,4 +144,37 @@ def plot_confusion_matrix(y_true, y_pred, output_dir, result_name):
     plot_path = os.path.join(output_dir, f'{result_name}_confusion_matrix.png')
     plt.savefig(plot_path)
     plt.close()
-    print(f"Confusion matrix plot saved to {plot_path}") 
+    print(f"Confusion matrix plot saved to {plot_path}")
+
+def plot_explained_variance(svd_model, output_dir):
+    """
+    Generates and saves a scree plot for the explained variance of the SVD components.
+
+    Args:
+        svd_model: The fitted TruncatedSVD model object.
+        output_dir (str): The directory where the plot will be saved.
+    """
+    print("\nPlotting explained variance for dimensionality reduction...")
+    
+    exp_var = svd_model.explained_variance_ratio_
+    cum_exp_var = np.cumsum(exp_var)
+    n_components = len(exp_var)
+    
+    plt.figure(figsize=(12, 7))
+    plt.bar(range(1, n_components + 1), exp_var, alpha=0.6, align='center',
+            label='Individual explained variance')
+    plt.step(range(1, n_components + 1), cum_exp_var, where='mid',
+             label='Cumulative explained variance', color='red')
+    plt.ylabel('Explained Variance Ratio')
+    plt.xlabel('Principal Component Index')
+    plt.title('Explained Variance by SVD Components')
+    plt.legend(loc='best')
+    plt.grid(True)
+    
+    total_var = svd_model.explained_variance_ratio_.sum()
+    print(f"Total variance explained by {n_components} components: {total_var:.4f}")
+
+    plot_path = os.path.join(output_dir, 'svd_explained_variance.png')
+    plt.savefig(plot_path)
+    plt.close()
+    print(f"SVD explained variance plot saved to {plot_path}") 

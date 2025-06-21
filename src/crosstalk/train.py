@@ -9,6 +9,7 @@ import time
 from sklearn.preprocessing import StandardScaler
 from scipy.sparse import hstack
 import numpy as np
+from sklearn.decomposition import TruncatedSVD
 
 #import custom modules from within the crosstalk project:
 from .dataset import basic_dataloader
@@ -34,7 +35,7 @@ def run_experiment(config):
         json.dump(config, f, indent=4)
 
     # 1. Load Data
-    print("\n[1/5] Loading data...")
+    print("\n[1/6] Loading data...")
     X_fp, X_num, y = basic_dataloader(
         filepath=config['DATA_PATH'],
         fingerprint_cols=config['FINGERPRINT_FEATURES'],
@@ -47,7 +48,7 @@ def run_experiment(config):
         groups = groups[:len(y)]
 
     # 2. Split Data (Train / Validation / Test)
-    print("\n[2/5] Splitting data into train, validation, and test sets...")
+    print("\n[2/6] Splitting data into train, validation, and test sets...")
     
     # We calculate the number of splits needed to achieve the desired test set size
     test_size = config['TEST_SIZE']
@@ -67,23 +68,49 @@ def run_experiment(config):
     X_num_train_val = X_num[train_val_idx] if X_num is not None else None
     groups_train_val = groups[train_val_idx]
     
-    # Scale numeric features - this is a critical step
+    # 2.5. Dimensionality Reduction (Optional)
+    if config.get('DIMENSIONALITY_REDUCTION', {}).get('enabled', False):
+        dr_config = config['DIMENSIONALITY_REDUCTION']
+        n_components = dr_config['n_components']
+        print(f"\n[2.5/6] Applying TruncatedSVD to reduce fingerprint dimensions to {n_components}...")
+
+        svd = TruncatedSVD(n_components=n_components, random_state=42)
+        
+        # Fit on the training data and transform both train and test data
+        X_fp_train_val = svd.fit_transform(X_fp_train_val)
+        X_fp_test = svd.transform(X_fp_test)
+        
+        # Save the fitted SVD model
+        svd_model_path = os.path.join(output_dir, 'svd_model.joblib')
+        joblib.dump(svd, svd_model_path)
+        print(f"SVD model saved to {svd_model_path}")
+
+        # Plot the explained variance
+        eval.plot_explained_variance(svd, output_dir)
+
+    # 3. Scale numeric features and Combine
     if X_num is not None:
+        print("\n[3/6] Scaling numeric features and combining with fingerprints...")
         scaler = StandardScaler()
         X_num_train_val_scaled = scaler.fit_transform(X_num_train_val)
         X_num_test_scaled = scaler.transform(X_num_test)
         
-        # Combine scaled numeric features with sparse fingerprint features for the final matrices
-        X_train_val_final = hstack([X_fp_train_val, X_num_train_val_scaled], format='csr')
-        X_test_final = hstack([X_fp_test, X_num_test_scaled], format='csr')
+        # If we used dimensionality reduction, X_fp is dense. Use np.hstack.
+        if config.get('DIMENSIONALITY_REDUCTION', {}).get('enabled', False):
+            X_train_val_final = np.hstack([X_fp_train_val, X_num_train_val_scaled])
+            X_test_final = np.hstack([X_fp_test, X_num_test_scaled])
+        else:
+            # Otherwise, X_fp is sparse. Use scipy.sparse.hstack.
+            X_train_val_final = hstack([X_fp_train_val, X_num_train_val_scaled], format='csr')
+            X_test_final = hstack([X_fp_test, X_num_test_scaled], format='csr')
     else:
         X_train_val_final = X_fp_train_val
         X_test_final = X_fp_test
 
-    # 3. Hyperparameter Tuning (Optional)
+    # 4. Hyperparameter Tuning (Optional)
     best_params = config['MODEL_PARAMS']
     if config.get('HYPERPARAM_TUNING', {}).get('enabled', False):
-        print("\n[3/5] Starting hyperparameter tuning with GridSearchCV...")
+        print("\n[4/6] Starting hyperparameter tuning with GridSearchCV...")
         
         param_grid = config['HYPERPARAM_TUNING']['param_grids'][config['MODEL_NAME']]
         base_model = models.get_model(config['MODEL_NAME'])
@@ -96,7 +123,7 @@ def run_experiment(config):
             param_grid=param_grid,
             scoring='f1_weighted',
             cv=cv_splitter,
-            n_jobs=-1,
+            n_jobs=4,
             verbose=2
         )
         grid_search.fit(X_train_val_final, y_train_val, groups=groups_train_val)
@@ -116,19 +143,20 @@ def run_experiment(config):
             json.dump(best_params, f, indent=4)
         print(f"Best parameters saved to {best_params_path}")
 
-    # 4. Train Final Model
-    print(f"\n[4/5] Training final {config['MODEL_NAME']} model...")
+    # 5. Train Final Model
+    print(f"\n[5/6] Training final {config['MODEL_NAME']} model...")
     final_model = models.get_model(config['MODEL_NAME'], best_params)
     final_model.fit(X_train_val_final, y_train_val)
     print("Final model training complete.")
 
-    # 5. Evaluate Final Model on Test Set
+    # 6. Evaluate Final Model on Test Set
+    print("\n[6/6] Evaluating model on test set...")
     eval.evaluate_and_save_results(final_model, X_test_final, y_test, output_dir, result_name='test')
 
-    # 6. Perform Threshold Optimization Analysis (Optional)
+    # 7. Perform Threshold Optimization Analysis (Optional)
     optimal_threshold = 0.5 # Default threshold
     if config.get('THRESHOLD_OPTIMIZATION', {}).get('enabled', False):
-        print("\n[6/6] Performing threshold optimization analysis...")
+        print("\n[7/7] Performing threshold optimization analysis...")
         y_pred_proba_test = final_model.predict_proba(X_test_final)[:, 1]
         
         # Create a sub-folder within the main run directory for threshold results
