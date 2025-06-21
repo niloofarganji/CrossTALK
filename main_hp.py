@@ -7,7 +7,7 @@ from src.crosstalk import train
 
 CONFIG = {
     # Name for this specific run, used to create the output folder.
-    'RUN_NAME': 'xgboost_paramtuned_connectivity_fps',
+    'RUN_NAME': 'xgboost_paramtuned_ECFP6_FCFP6_TOPTOR_ATOMPAIR',
 
     # The model architecture to use for this experiment.
     # Options: 'logistic_regression', 'random_forest', 'lightgbm', 'xgboost'
@@ -29,6 +29,12 @@ CONFIG = {
                 'learning_rate': [0.05, 0.1],
                 'max_depth': [3, 5, 7]
             },
+            'catboost': {
+                'n_estimators': [200, 500],
+                'learning_rate': [0.05, 0.1],
+                'depth': [4, 6, 8], # Equivalent to max_depth
+                'l2_leaf_reg': [1, 3, 5] # L2 regularization
+            },
             'lightgbm': {
                 'n_estimators': [200, 500],
                 'learning_rate': [0.05, 0.1],
@@ -42,6 +48,12 @@ CONFIG = {
         }
     },
 
+    # --- Threshold Optimization ---
+    # Set to True to analyze precision-recall trade-offs at different thresholds.
+    'THRESHOLD_OPTIMIZATION': {
+        'enabled': True
+    },
+
     # Base directory where all experiment results will be saved.
     'EXPORT_BASE_DIR': 'Exports',
     
@@ -49,7 +61,7 @@ CONFIG = {
     'DATA_PATH': os.path.join('data', 'crosstalk_train (2).parquet'),
     
     # List of fingerprint columns to use.
-    'FINGERPRINT_FEATURES': ['ECFP4'],
+    'FINGERPRINT_FEATURES': ['ECFP6', 'FCFP6', 'TOPTOR', 'ATOMPAIR'],
 
     # List of numeric columns to use.
     'NUMERIC_FEATURES': ['MW', 'ALOGP'],
