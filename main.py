@@ -7,17 +7,17 @@ from src.crosstalk import train
 
 CONFIG = {
     # Name for this specific run, used to create the output folder.
-    'RUN_NAME': 'lightgbm_all_connectivity_fps',
+    'RUN_NAME': 'catboost_ECFP6_FCFP6_TOPTOR_ATOMPAIR',
 
     # The model architecture to use for this experiment.
     # Options: 'logistic_regression', 'random_forest', 'lightgbm'
-    'MODEL_NAME': 'lightgbm',
+    'MODEL_NAME': 'catboost',
 
     # Model-specific parameters. These will be passed to the model's constructor.
     'MODEL_PARAMS': {
-        'n_estimators': 500,  # More trees can be beneficial for gradient boosting
-        'learning_rate': 0.05, # A smaller learning rate often improves accuracy
-        'num_leaves': 31,     # Default value, good starting point
+        'n_estimators': 500,      # Number of trees to build
+        'learning_rate': 0.05,    # Step size shrinkage
+        'max_depth': 6,           # Depth of the trees (CatBoost uses max_depth instead of num_leaves)
     },
 
     # Base directory where all experiment results will be saved.
@@ -27,7 +27,7 @@ CONFIG = {
     'DATA_PATH': os.path.join('data', 'crosstalk_train (2).parquet'),
     
     # List of fingerprint columns to use.
-    'FINGERPRINT_FEATURES': ['ECFP4', 'ECFP6', 'FCFP4', 'FCFP6'],
+    'FINGERPRINT_FEATURES': ['ECFP6', 'FCFP6', 'TOPTOR', 'ATOMPAIR'],
 
     # List of numeric columns to use.
     'NUMERIC_FEATURES': ['MW', 'ALOGP'],
@@ -38,6 +38,12 @@ CONFIG = {
     # Proportion of data to be used for the validation set.
     'TEST_SIZE': 0.2, # Using a smaller validation set to maximize training data
     
+    # --- Threshold Optimization ---
+    # Set to True to analyze precision-recall trade-offs at different thresholds.
+    'THRESHOLD_OPTIMIZATION': {
+        'enabled': True
+    },
+
     # Set to None to run on the entire dataset.
     'MAX_ROWS': None,
     
