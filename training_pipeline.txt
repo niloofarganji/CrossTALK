@@ -1,0 +1,53 @@
+This document outlines the step-by-step process of the machine learning pipeline when hyperparameter tuning is enabled.
+
+### Step 1: The Initial Split (Creating the Hold-Out Test Set)
+
+First, the script takes the *entire* dataset and performs one single, crucial split.
+
+- **Input:** All data specified in the configuration.
+- **Action:** It uses `StratifiedGroupKFold` to carve out a percentage of the data (defined by 'TEST_SIZE') to be the **Test Set**.
+- **Output:**
+    - **Training + Validation Set:** A large chunk of data used for the entire hyperparameter tuning process.
+    - **Test Set:** A smaller set that is locked away and not used at all during tuning or model training.
+
+### Step 2: K-Fold Cross-Validation for Hyperparameter Tuning
+
+Next, the script focuses only on the **Training + Validation Set**. This is where k-fold cross-validation happens.
+
+- **Input:** The Training + Validation set from Step 1.
+- **Action:** `GridSearchCV` takes over. For *each* combination of hyperparameters it needs to test, it performs a k-fold cross-validation (e.g., 5-fold):
+    1. It temporarily splits the data into 5 smaller folds.
+    2. It trains a model on 4 of the folds.
+    3. It evaluates the model on the 5th, held-out fold.
+    4. This process is repeated 5 times, ensuring every fold gets a turn as the evaluation set.
+    5. The 5 scores are then averaged to get a single, robust performance score for that specific hyperparameter combination.
+
+### Step 3: Selecting the Best Hyperparameters
+
+After Step 2 is complete for all combinations, `GridSearchCV` selects the winning set of hyperparameters. This selection is based on which combination achieved the highest average score on the evaluation metric defined in the code (`f1_weighted`).
+
+### Step 4: Training the Final Model
+
+With the best hyperparameters identified, the k-fold splits from the tuning step are discarded.
+
+- **Action:** The script trains **one new, final model** from scratch.
+- **Input:**
+    1. The **entire Training + Validation set**.
+    2. The set of **best hyperparameters** found in Step 3.
+- This ensures the final model is trained on as much data as possible before its final evaluation.
+
+### Step 5: The Final Exam (Evaluating on the Test Set)
+
+This is where the hold-out **Test Set** from Step 1 is finally used.
+
+- **Action:** The final, trained model is evaluated on this completely unseen data.
+- The metrics generated in this step (and saved to `test_metrics.json`) provide an unbiased estimate of how the model is expected to perform on new, real-world data.
+
+### Step 6: Finding and Saving the Best Threshold
+
+This is the last step to ensure the model is optimized for balanced performance.
+
+- **Action:** Using the predictions from the Test Set evaluation, the `analyze_thresholds` function calculates the **optimal classification threshold** that maximizes the F1-score.
+- The script then takes the final model from Step 4, wraps it in a special `ThresholdedClassifier` object containing this optimal threshold, and saves the complete package to `model.joblib`.
+
+The final `model.joblib` artifact is a self-contained, optimized model that is trained with the best hyperparameters and will automatically use the best classification threshold for its predictions. 
