@@ -7,11 +7,11 @@ from src.crosstalk import train
 
 CONFIG = {
     # Name for this specific run, used to create the output folder.
-    'RUN_NAME': 'xgboost_paramtuned_ECFP6_FCFP6_TOPTOR_ATOMPAIR',
+    'RUN_NAME': 'catboost_paramtuned_ECFP6_FCFP6_TOPTOR_ATOMPAIR',
 
     # The model architecture to use for this experiment.
     # Options: 'logistic_regression', 'random_forest', 'lightgbm', 'xgboost'
-    'MODEL_NAME': 'xgboost',
+    'MODEL_NAME': 'catboost',
 
     # Model-specific parameters for a baseline run (when tuning is disabled).
     'MODEL_PARAMS': {
