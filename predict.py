@@ -11,14 +11,14 @@ from scipy.sparse import hstack
 
 # Path to the saved model artifact from a previous training run.
 # This should be the .joblib file containing the wrapped pipeline.
-MODEL_PATH = 'Exports/xgboost_ECFP6_FCFP6_TOPTOR_ATOMPAIR_20250623-084656/model.joblib'
+MODEL_PATH = 'Exports/xgboost_prob_paramtuned_ECFP6_FCFP6_TOPTOR_ATOMPAIR_non_numeric_20250623-143702/model.joblib'
 
 # Path to the new, unseen data you want to make predictions on.
 # This data must contain the same feature columns used for training.
-NEW_DATA_PATH = 'data/crosstalk_test_20250305_inputs.parquet' 
+NEW_DATA_PATH = 'data/crosstalk_test_inputs.parquet' 
 
 # Path where the final output file with predictions will be saved (folder called Predictions)
-OUTPUT_PATH = 'Predictions/results1.csv' 
+OUTPUT_PATH = 'Predictions/results2.csv' 
 
 # --- Helper Functions ---
 
@@ -148,20 +148,27 @@ def run_inference(model_path, data_path, output_path):
 
     # 4. Make predictions
     print(f"X_final shape: {X_final.shape}")
-    predictions = model.predict(X_final)
-    print(f"Predictions generated for {len(predictions)} samples.")
+    # Get the probabilities for the positive class (class 1)
+    probabilities = model.predict_proba(X_final)[:, 1]
+    print(f"Probabilities generated for {len(probabilities)} samples.")
 
     # 5. Save results
     # Create a new DataFrame with only the essential information to keep the output file small.
-    # We save the SMILES string as an identifier and the final prediction.
-    if 'SMILES' in new_data_df.columns:
+    # We save an identifier and the final prediction probability.
+    if 'RandomID' in new_data_df.columns:
+        output_df = pd.DataFrame({
+            'RandomID': new_data_df['RandomID'],
+            'predicted_probability': probabilities
+        })
+    elif 'SMILES' in new_data_df.columns:
         output_df = pd.DataFrame({
             'SMILES': new_data_df['SMILES'],
-            'predicted_label': predictions
+            'predicted_probability': probabilities
         })
     else:
-        # Fallback if there is no SMILES column, just save the predictions.
-        output_df = pd.DataFrame({'predicted_label': predictions})
+        # Fallback if no identifier column is found
+        print("Warning: No 'RandomID' or 'SMILES' column found. Saving probabilities only.")
+        output_df = pd.DataFrame({'predicted_probability': probabilities})
 
     # Create output directory if it doesn't exist
     output_dir = os.path.dirname(output_path)
