@@ -27,12 +27,6 @@ def run_experiment(config):
     output_dir = os.path.join(config['EXPORT_BASE_DIR'], f"{run_name}_{timestamp}")
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    
-    print(f"--- Starting Experiment: {run_name} ---")
-    print(f"Results will be saved to: {output_dir}")
-
-    with open(os.path.join(output_dir, 'config.json'), 'w') as f:
-        json.dump(config, f, indent=4)
 
     # 1. Load Data
     print("\n[1/6] Loading data...")
@@ -47,8 +41,22 @@ def run_experiment(config):
     if config.get('MAX_ROWS'):
         groups = groups[:len(y)]
 
+    # Store the exact number of fingerprint features from the training set.
+    # This is crucial for ensuring the prediction data has the same shape.
+    config['FP_N_FEATURES'] = X_fp.shape[1]
+    
+    print(f"--- Starting Experiment: {run_name} ---")
+    print(f"Results will be saved to: {output_dir}")
+
+    # Save the final configuration, now including the number of fingerprint features.
+    with open(os.path.join(output_dir, 'config.json'), 'w') as f:
+        json.dump(config, f, indent=4)
+
     # 2. Split Data (Train / Validation / Test)
-    print("\n[2/6] Splitting data into train, validation, and test sets...")
+    if config.get('HYPERPARAM_TUNING', {}).get('enabled', False):
+        print("\n[2/6] Splitting data into train/validation (for tuning) and test sets...")
+    else:
+        print("\n[2/6] Splitting data into train and test sets...")
     
     # We calculate the number of splits needed to achieve the desired test set size
     test_size = config['TEST_SIZE']
@@ -94,6 +102,11 @@ def run_experiment(config):
         scaler = StandardScaler()
         X_num_train_val_scaled = scaler.fit_transform(X_num_train_val)
         X_num_test_scaled = scaler.transform(X_num_test)
+        
+        # Save the fitted scaler
+        scaler_model_path = os.path.join(output_dir, 'scaler.joblib')
+        joblib.dump(scaler, scaler_model_path)
+        print(f"Scaler model saved to {scaler_model_path}")
         
         # If we used dimensionality reduction, X_fp is dense. Use np.hstack.
         if config.get('DIMENSIONALITY_REDUCTION', {}).get('enabled', False):
