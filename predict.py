@@ -152,8 +152,16 @@ def run_inference(model_path, data_path, output_path):
     print(f"Predictions generated for {len(predictions)} samples.")
 
     # 5. Save results
-    output_df = new_data_df.copy()
-    output_df['predicted_label'] = predictions
+    # Create a new DataFrame with only the essential information to keep the output file small.
+    # We save the SMILES string as an identifier and the final prediction.
+    if 'SMILES' in new_data_df.columns:
+        output_df = pd.DataFrame({
+            'SMILES': new_data_df['SMILES'],
+            'predicted_label': predictions
+        })
+    else:
+        # Fallback if there is no SMILES column, just save the predictions.
+        output_df = pd.DataFrame({'predicted_label': predictions})
 
     # Create output directory if it doesn't exist
     output_dir = os.path.dirname(output_path)
@@ -164,6 +172,7 @@ def run_inference(model_path, data_path, output_path):
     output_df.to_csv(output_path, index=False)
     print(f"\n--- Inference Complete ---")
     print(f"Results with predictions saved to: {output_path}")
+    print(f"Output file contains {len(output_df.columns)} columns and {len(output_df)} rows.")
 
 
 if __name__ == "__main__":
