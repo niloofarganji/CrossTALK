@@ -1,6 +1,6 @@
 #import standard libraries:
 import pandas as pd
-from sklearn.model_selection import StratifiedGroupKFold, GridSearchCV
+from sklearn.model_selection import StratifiedGroupKFold, cross_val_score, GroupKFold
 from sklearn.linear_model import LogisticRegression
 import joblib
 import os
@@ -10,6 +10,7 @@ from sklearn.preprocessing import StandardScaler
 from scipy.sparse import hstack
 import numpy as np
 from sklearn.decomposition import TruncatedSVD
+import optuna
 
 #import custom modules from within the crosstalk project:
 from .dataset import basic_dataloader
@@ -40,6 +41,14 @@ def run_experiment(config):
     groups = pd.read_parquet(config['DATA_PATH'], columns=['DEL_ID'])['DEL_ID'].values
     if config.get('MAX_ROWS'):
         groups = groups[:len(y)]
+
+    # Load cluster IDs if using cluster-based splitting
+    cluster_ids = None
+    if config.get('CLUSTER_SPLIT', {}).get('enabled', False):
+        print("Loading cluster IDs for diversity-aware splitting.")
+        cluster_ids = pd.read_parquet(config['DATA_PATH'], columns=['cluster_id'])['cluster_id'].values
+        if config.get('MAX_ROWS'):
+            cluster_ids = cluster_ids[:len(y)]
 
     # Store the exact number of fingerprint features from the training set.
     # This is crucial for ensuring the prediction data has the same shape.
@@ -121,31 +130,57 @@ def run_experiment(config):
         X_test_final = X_fp_test
 
     # 4. Hyperparameter Tuning (Optional)
-    best_params = config['MODEL_PARAMS']
+    best_params = config.get('MODEL_PARAMS', {})
     if config.get('HYPERPARAM_TUNING', {}).get('enabled', False):
-        print("\n[4/6] Starting hyperparameter tuning with GridSearchCV...")
+        print("\n[4/6] Starting hyperparameter tuning with Optuna...")
         
-        param_grid = config['HYPERPARAM_TUNING']['param_grids'][config['MODEL_NAME']]
-        base_model = models.get_model(config['MODEL_NAME'])
-        
-        # Use StratifiedGroupKFold for the inner cross-validation during tuning
-        cv_splitter = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+        hp_config = config['HYPERPARAM_TUNING']
+        search_space_config = hp_config['optuna_search_space'][config['MODEL_NAME']]
+        n_trials = hp_config.get('n_trials', 50)
 
-        grid_search = GridSearchCV(
-            estimator=base_model,
-            param_grid=param_grid,
-            scoring='f1_weighted',
-            cv=cv_splitter,
-            n_jobs=4,
-            verbose=2
-        )
-        grid_search.fit(X_train_val_final, y_train_val, groups=groups_train_val)
+        def objective(trial):
+            params = {}
+            for name, space in search_space_config.items():
+                if space[0] == 'int':
+                    params[name] = trial.suggest_int(name, space[1], space[2])
+                elif space[0] == 'float' and len(space) == 3:
+                    params[name] = trial.suggest_float(name, space[1], space[2])
+                elif space[0] == 'float' and len(space) == 4 and space[3] == 'log':
+                    params[name] = trial.suggest_float(name, space[1], space[2], log=True)
+                elif space[0] == 'categorical':
+                     params[name] = trial.suggest_categorical(name, space[1])
+            
+            model = models.get_model(config['MODEL_NAME'], model_params=params)
+            
+            # Use diversity-aware GroupKFold if enabled, otherwise use default stratified split
+            if config.get('CLUSTER_SPLIT', {}).get('enabled', False):
+                cv_splitter = GroupKFold(n_splits=5)
+                # Note: With pure GroupKFold, we use the cluster_ids as the grouping variable
+                cv_groups = cluster_ids[train_val_idx]
+            else:
+                cv_splitter = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+                cv_groups = groups_train_val
+
+            # Use cross_val_score for efficient evaluation
+            f1_scores = cross_val_score(
+                model, 
+                X_train_val_final, 
+                y_train_val, 
+                groups=cv_groups,
+                cv=cv_splitter, 
+                scoring='f1_weighted',
+                n_jobs=1
+            )
+            return np.mean(f1_scores)
+
+        study = optuna.create_study(direction='maximize')
+        study.optimize(objective, n_trials=n_trials)
         
-        best_params = grid_search.best_params_
+        best_params = study.best_params
         print(f"Best parameters found: {best_params}")
         
         # Save tuning results
-        tuning_results_df = pd.DataFrame(grid_search.cv_results_)
+        tuning_results_df = study.trials_dataframe()
         tuning_results_path = os.path.join(output_dir, 'tuning_results.csv')
         tuning_results_df.to_csv(tuning_results_path, index=False)
         print(f"Tuning results saved to {tuning_results_path}")
