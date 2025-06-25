@@ -3,43 +3,91 @@ import scipy
 import pyarrow.parquet as pq
 import numpy as np
 from tqdm.auto import tqdm
-from scipy.sparse import hstack
+from scipy.sparse import hstack, csr_matrix
+
+
+def parse_fingerprints_to_sparse(fp_series):
+    """
+    Efficiently converts a pandas Series of comma-separated fingerprint strings
+    into a SciPy CSR sparse matrix.
+    """
+    rows, cols, data = [], [], []
+    fp_len = -1
+
+    for i, fp_str in enumerate(fp_series):
+        if isinstance(fp_str, str):
+            bits = [int(b) for b in fp_str.split(',')]
+            if fp_len == -1:
+                fp_len = len(bits)
+            
+            if len(bits) != fp_len:
+                # In a real scenario, might need more robust error handling
+                continue 
+
+            non_zero_indices = np.where(np.array(bits) == 1)[0]
+            rows.extend([i] * len(non_zero_indices))
+            cols.extend(non_zero_indices)
+            data.extend([1] * len(non_zero_indices))
+
+    # If fp_len was never set, it means no valid fingerprints were found
+    if fp_len == -1:
+        if len(fp_series) > 0:
+             # Return an empty matrix with the correct number of rows but 0 columns
+             return csr_matrix((len(fp_series), 0))
+        else: # No data at all
+             return csr_matrix((0,0))
+    
+    return csr_matrix((data, (rows, cols)), shape=(len(fp_series), fp_len))
 
 
 def basic_dataloader(
-    filepath, x_cols, y_col='DELLabel', max_to_load=None, chunk_size=50000
+    filepath, 
+    fingerprint_cols, 
+    numeric_cols=None,
+    y_col='DELLabel', 
+    max_to_load=None, 
+    chunk_size=50000
 ):
     """
-    Loads data from a Parquet file, handling multiple feature columns and creating a sparse matrix.
+    Loads data from a Parquet file, handling fingerprint, numeric, and label columns.
 
     Args:
         filepath (str): Path to the Parquet file.
-        x_cols (list of str): A list of names of the feature columns to be combined.
+        fingerprint_cols (list of str): A list of fingerprint column names to be combined.
+        numeric_cols (list of str, optional): A list of numeric column names. Defaults to None.
         y_col (str, optional): Name of the label column. Defaults to 'DELLabel'.
-        max_to_load (int, optional): Number of rows to load. If None, loads all rows. Defaults to None.
-        chunk_size (int, optional): Number of rows to read at a time from disk. Defaults to 50000.
+        max_to_load (int, optional): Number of rows to load. If None, loads all rows.
+        chunk_size (int, optional): Number of rows to read at a time from disk.
 
     Returns:
-        X (scipy.sparse.csr_matrix): Combined sparse feature matrix.
+        X_fp (scipy.sparse.csr_matrix): Combined sparse fingerprint matrix.
+        X_num (np.ndarray or None): Combined numeric feature matrix.
         y (np.ndarray or None): Label array if y_col is provided, else None.
     """
-    if isinstance(x_cols, str):
-        x_cols = [x_cols]
+    if isinstance(fingerprint_cols, str):
+        fingerprint_cols = [fingerprint_cols]
+    
+    numeric_cols = numeric_cols or []
+    
+    # Determine all columns to load from the file
+    columns_to_load = fingerprint_cols + numeric_cols
+    if y_col:
+        columns_to_load.append(y_col)
 
     pf = pq.ParquetFile(filepath)
-    columns = x_cols + ([y_col] if y_col is not None else [])
-    
     if max_to_load is None:
         max_to_load = pf.metadata.num_rows
     
-    list_of_sparse_matrices = [[] for _ in x_cols]
+    # Initialize lists to hold the data chunks
+    fp_chunks = [[] for _ in fingerprint_cols]
+    num_chunks = []
     y_list = []
     loaded = 0
 
     n_chunks = int(np.ceil(max_to_load / chunk_size))
     pbar = tqdm(total=n_chunks, desc=f'Loading data from {filepath}')
     
-    for batch in pf.iter_batches(columns=columns, batch_size=chunk_size):
+    for batch in pf.iter_batches(columns=columns_to_load, batch_size=chunk_size):
         batch_df = batch.to_pandas()
         
         current_batch_size = len(batch_df)
@@ -48,13 +96,19 @@ def basic_dataloader(
             batch_df = batch_df.iloc[:remaining]
             current_batch_size = remaining
 
-        if y_col is not None:
-            y_list.append(batch_df[y_col].values)
+        # Process and append fingerprint data
+        for i, fp_col in enumerate(fingerprint_cols):
+            # OLD: exploded = batch_df[fp_col].str.split(',', expand=True).astype(np.int8)
+            # NEW: Efficiently convert to sparse without intermediate dense matrix
+            fp_sparse_chunk = parse_fingerprints_to_sparse(batch_df[fp_col])
+            fp_chunks[i].append(fp_sparse_chunk)
+        
+        # Process and append numeric data
+        if numeric_cols:
+            num_chunks.append(batch_df[numeric_cols].values)
 
-        for i, x_col in enumerate(x_cols):
-            # Process each feature column and create a sparse matrix
-            exploded = batch_df[x_col].str.split(',', expand=True).astype(np.int8)
-            list_of_sparse_matrices[i].append(scipy.sparse.csr_matrix(exploded))
+        if y_col:
+            y_list.append(batch_df[y_col].values)
         
         loaded += current_batch_size
         del batch_df
@@ -62,21 +116,19 @@ def basic_dataloader(
         if loaded >= max_to_load:
             break
             
-    pbar.n = pbar.total
-    pbar.refresh()
     pbar.close()
 
-    # Horizontally stack the matrices for each feature to create the final feature matrix
-    final_feature_matrices = []
-    for mat_list in list_of_sparse_matrices:
-        final_feature_matrices.append(scipy.sparse.vstack(mat_list))
-    
-    X = hstack(final_feature_matrices, format='csr')
+    # --- Assemble final matrices ---
+    # Vertically stack the lists of chunk matrices, then horizontally stack the final fp matrices
+    final_fp_matrices = [scipy.sparse.vstack(chunks) for chunks in fp_chunks]
+    X_fp = hstack(final_fp_matrices, format='csr') if final_fp_matrices else None
 
-    if y_col is not None and y_list:
-        y = np.concatenate(y_list)
-        return X, y
-    else:
-        return X
+    # Concatenate numeric data chunks
+    X_num = np.vstack(num_chunks) if num_chunks else None
+    
+    # Concatenate label data chunks
+    y = np.concatenate(y_list) if y_list else None
+
+    return X_fp, X_num, y
     
     
