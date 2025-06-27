@@ -9,7 +9,9 @@ import pyarrow.parquet as pq
 from tqdm import tqdm
 import argparse
 from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score
-from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.model_selection import StratifiedGroupKFold, train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 
 # --- Configuration ---
 # TODO: Before running, update this list with the correct paths to your trained expert models.
@@ -17,6 +19,7 @@ EXPERT_MODEL_DIRS = [
     'Exports/Expert_Models/Xgboost_prob_paramtuned_ECFP6_20250625-135259',
     'Exports/Expert_Models/Xgboost_prob_paramtuned_FCFP6_20250625-135920',
     'Exports/Expert_Models/Xgboost_prob_paramtuned_ATOMPAIR_20250625-135551',
+    'Exports/Expert_Models/Xgboost_prob_paramtuned_RDK_20250625-153546',
 ]
 
 EVAL_DATA_PATH = 'data/crosstalk_train (2).parquet'
@@ -47,7 +50,8 @@ def _parse_fingerprints_for_prediction(df, fingerprint_cols):
 def run_single_model_inference(model_dir, data_path, chunk_size, eval_indices):
     """
     Runs inference for a single expert model on a specific subset of the data.
-    Returns an array of prediction probabilities for the evaluation set.
+    Returns a pandas Series of prediction probabilities for the evaluation set, 
+    indexed by the original row index.
     """
     model_path = os.path.join(model_dir, 'model.joblib')
     config_path = os.path.join(model_dir, 'config.json')
@@ -62,7 +66,7 @@ def run_single_model_inference(model_dir, data_path, chunk_size, eval_indices):
     num_features = config.get('NUMERIC_FEATURES', [])
     use_svd = config.get('DIMENSIONALITY_REDUCTION', {}).get('enabled', False)
     
-    all_probabilities = []
+    all_probabilities = {} # Changed to a dictionary to store {index: probability}
     pf = pq.ParquetFile(data_path)
     
     # Convert eval_indices to a set for efficient lookup
@@ -74,14 +78,19 @@ def run_single_model_inference(model_dir, data_path, chunk_size, eval_indices):
         batch_indices = range(row_offset, row_offset + len(batch))
         
         # Find the intersection of this batch's indices and the desired evaluation indices
-        target_indices_in_batch = [i for i, idx in enumerate(batch_indices) if idx in eval_indices_set]
+        target_relative_indices = []
+        target_absolute_indices = []
+        for i, idx in enumerate(batch_indices):
+            if idx in eval_indices_set:
+                target_relative_indices.append(i)
+                target_absolute_indices.append(idx)
 
-        if not target_indices_in_batch:
+        if not target_relative_indices:
             row_offset += len(batch)
             continue
             
         # Convert to pandas and select only the rows we need for this evaluation
-        chunk_df = batch.to_pandas().iloc[target_indices_in_batch]
+        chunk_df = batch.to_pandas().iloc[target_relative_indices]
         
         X_fp = _parse_fingerprints_for_prediction(chunk_df, fp_features)
         
@@ -103,11 +112,13 @@ def run_single_model_inference(model_dir, data_path, chunk_size, eval_indices):
 
         if X_final is not None:
             probabilities = model.predict_proba(X_final)[:, 1]
-            all_probabilities.extend(probabilities)
+            # Map predictions back to their original absolute index
+            for idx, prob in zip(target_absolute_indices, probabilities):
+                all_probabilities[idx] = prob
 
         row_offset += len(batch)
             
-    return np.array(all_probabilities)
+    return pd.Series(all_probabilities)
 
 def evaluate_ensemble(decision_threshold):
     """Main function to evaluate the ensemble against a held-out portion of the training data."""
@@ -129,44 +140,103 @@ def evaluate_ensemble(decision_threshold):
     # We only need the second split, which is the test set indices
     _, test_idx = next(sgkf_test_split.split(np.zeros(len(y_true_full)), y_true_full, groups_full))
 
-    # Create the true validation set
+    # Create the true validation set labels
     y_true_eval = y_true_full.iloc[test_idx]
     
     print(f"Created a validation set of size {len(y_true_eval)} for fair evaluation.")
+    
+    # --- Stacking Implementation ---
+    # Split the validation set into a meta-training set and a meta-test set
+    # to train and evaluate the stacking model without data leakage.
+    meta_train_idx, meta_test_idx, y_meta_train, y_meta_test = train_test_split(
+        test_idx, y_true_eval, test_size=0.5, random_state=42, stratify=y_true_eval
+    )
+    print(f"Split validation data: {len(y_meta_train)} for meta-model training, {len(y_meta_test)} for final evaluation.")
 
-    # 2. Get probability predictions from each expert model, running on the same test set portion
-    all_expert_preds = {}
+    # 2. Get predictions from each expert on the meta-training set
+    print("\n--- Generating predictions for Meta-Model Training ---")
+    meta_train_preds = {}
     for model_dir in EXPERT_MODEL_DIRS:
         model_name = os.path.basename(model_dir)
-        # Note: We pass the indices to the inference function now
-        expert_probs = run_single_model_inference(model_dir, EVAL_DATA_PATH, CHUNK_SIZE, test_idx)
-        if expert_probs is not None and len(expert_probs) == len(y_true_eval):
-            all_expert_preds[model_name] = expert_probs
+        expert_probs = run_single_model_inference(model_dir, EVAL_DATA_PATH, CHUNK_SIZE, meta_train_idx)
+        if expert_probs is not None and len(expert_probs) == len(y_meta_train):
+            meta_train_preds[model_name] = expert_probs
         else:
-            print(f"Warning: Skipping {model_name} due to error or length mismatch.")
+            print(f"Warning: Skipping {model_name} for meta-train set due to error or mismatch.")
 
-    if not all_expert_preds:
-        print("Error: No valid predictions were generated. Aborting.")
+    X_meta_train = pd.DataFrame(meta_train_preds)
+    # CRITICAL FIX: Ensure the features dataframe is aligned with the labels, which were shuffled by train_test_split.
+    # The pd.DataFrame constructor sorts by index, which creates a mismatch.
+    if not X_meta_train.empty:
+        X_meta_train = X_meta_train.loc[y_meta_train.index]
+    
+    # 3. Get predictions from each expert on the meta-test set
+    print("\n--- Generating predictions for Final Evaluation ---")
+    meta_test_preds = {}
+    for model_dir in EXPERT_MODEL_DIRS:
+        model_name = os.path.basename(model_dir)
+        # Ensure that we only use models that succeeded on the training set
+        if model_name in X_meta_train.columns:
+            expert_probs = run_single_model_inference(model_dir, EVAL_DATA_PATH, CHUNK_SIZE, meta_test_idx)
+            if expert_probs is not None and len(expert_probs) == len(y_meta_test):
+                meta_test_preds[model_name] = expert_probs
+            else:
+                print(f"Warning: {model_name} failed on meta-test set. It will be excluded from evaluation.")
+
+    X_meta_test = pd.DataFrame(meta_test_preds)
+    # CRITICAL FIX: Ensure the features dataframe is aligned with the labels.
+    if not X_meta_test.empty:
+        X_meta_test = X_meta_test.loc[y_meta_test.index]
+
+    # Align columns to handle cases where a model might fail on one set
+    common_models = list(set(X_meta_train.columns) & set(X_meta_test.columns))
+    X_meta_train = X_meta_train[common_models]
+    X_meta_test = X_meta_test[common_models]
+    
+    if not common_models:
+        print("CRITICAL ERROR: No models produced valid predictions for both meta-train and meta-test sets. Aborting.")
         return
 
-    # 3. Calculate the ensembled predictions
-    ensemble_probs = np.mean(list(all_expert_preds.values()), axis=0)
-    all_expert_preds['Ensemble (Average)'] = ensemble_probs
+    print(f"\nTraining and evaluating with {len(common_models)} consistent expert models.")
 
-    # 4. Calculate and report metrics for all models
-    print("\n--- Model Performance Metrics ---")
+    # 4. Train Stacking Meta-Models
+    print("\n--- Training Stacking Meta-Models ---")
+    meta_models = {
+        'Logistic Regression': LogisticRegression(random_state=42, class_weight='balanced'),
+        'Random Forest': RandomForestClassifier(random_state=42, n_estimators=100, class_weight='balanced')
+    }
+    for name, model in meta_models.items():
+        print(f"Training {name}...")
+        model.fit(X_meta_train, y_meta_train)
+
+    # 5. Calculate Predictions on the Meta-Test Set for all models
+    all_final_preds = {}
+    # Baseline: Simple Average
+    all_final_preds['Ensemble (Average)'] = X_meta_test.mean(axis=1).values
+    # Stacking Models
+    for name, model in meta_models.items():
+        all_final_preds[f'Stacking ({name})'] = model.predict_proba(X_meta_test)[:, 1]
+    # Individual Expert Models
+    for model_name in X_meta_test.columns:
+        all_final_preds[model_name] = X_meta_test[model_name].values
+        
+    # 6. Calculate and report metrics for all models on the held-out meta-test set
+    print("\n--- Model Performance Metrics on Meta-Test Set ---")
     results = []
-    for name, probs in all_expert_preds.items():
+    for name, probs in all_final_preds.items():
+        if len(probs) != len(y_meta_test):
+            print(f"Skipping {name} due to prediction length mismatch.")
+            continue
         # Convert probabilities to binary labels for classification metrics
         y_pred = (probs >= decision_threshold).astype(int)
         
-        auc = roc_auc_score(y_true_eval, probs)
-        precision = precision_score(y_true_eval, y_pred)
-        recall = recall_score(y_true_eval, y_pred)
-        f1 = f1_score(y_true_eval, y_pred)
+        auc = roc_auc_score(y_meta_test, probs)
+        precision = precision_score(y_meta_test, y_pred, zero_division=0)
+        recall = recall_score(y_meta_test, y_pred, zero_division=0)
+        f1 = f1_score(y_meta_test, y_pred, zero_division=0)
         results.append({'Model': name, 'AUC': auc, 'Precision': precision, 'Recall': recall, 'F1-Score': f1})
 
-    results_df = pd.DataFrame(results)
+    results_df = pd.DataFrame(results).sort_values(by='AUC', ascending=False)
     print(results_df.to_string(index=False))
     print("\n--- Evaluation Complete ---")
 
