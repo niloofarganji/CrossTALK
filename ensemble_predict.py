@@ -13,20 +13,20 @@ from sklearn.model_selection import StratifiedGroupKFold
 # --- Configuration ---
 # List of expert models to use for the ensemble.
 EXPERT_MODEL_DIRS = [
-    'Exports/Expert_Models/Xgboost_prob_paramtuned_ECFP6_20250625-135259',
-    'Exports/Expert_Models/Xgboost_prob_paramtuned_FCFP6_20250625-135920',
-    'Exports/Expert_Models/Xgboost_prob_paramtuned_ATOMPAIR_20250625-135551',
-    'Exports/Expert_Models/Xgboost_prob_paramtuned_RDK_20250625-153546'
+    'Exports/Expert_Models/withadvsplit/Xgboost_prob_paramtuned_ECFP6_advsplit_20250702-114351',
+    'Exports/Expert_Models/withadvsplit/Xgboost_prob_paramtuned_FCFP6_advsplit_20250702-120010',
+    'Exports/Expert_Models/withadvsplit/Xgboost_prob_paramtuned_ATOMPAIR_advsplit_20250702-123546',
+    'Exports/Expert_Models/withadvsplit/Xgboost_prob_paramtuned_RDK_advsplit_20250702-121358'
 ]
 
 # Path to the labeled training data, used to train the meta-model.
-TRAIN_DATA_PATH = 'data/crosstalk_train (2).parquet'
+TRAIN_DATA_PATH = 'data/crosstalk_train_with_adv_scores.parquet'
 
 # Path to the new, unseen data you want to make predictions on.
 NEW_DATA_PATH = 'data/crosstalk_test_inputs.parquet'
 
 # Path where the final ensembled predictions will be saved.
-OUTPUT_PATH = 'Predictions/ensemble_metapredict_results.csv'
+OUTPUT_PATH = 'Predictions/ensemble_advsplit_nonum_results.csv'
 CHUNK_SIZE = 50000
 
 # --- Helper Functions ---
@@ -97,6 +97,10 @@ def run_single_model_inference(model_dir, data_path, chunk_size, eval_indices=No
         else:
             chunk_df = batch.to_pandas()
             current_absolute_indices = current_indices
+
+        # Standardize column names for consistency
+        if 'AlogP' in chunk_df.columns:
+            chunk_df = chunk_df.rename(columns={'AlogP': 'ALOGP'})
 
         X_fp = _parse_fingerprints_for_prediction(chunk_df, fp_features)
         
